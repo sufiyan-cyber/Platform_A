@@ -1,0 +1,177 @@
+// Agent Forge — persistence schema.
+//
+// Portability note: every column here uses types that exist on BOTH SQLite and
+// PostgreSQL (no native Json, no arrays, no enums). Structured values are stored
+// as JSON strings and parsed at the edge. Switching to Postgres for production is
+// a one-line `provider` change in the datasource block below — see README.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+/// A developer using the platform. Identity is intentionally lightweight
+/// (email -> signed httpOnly cookie); swap for a real IdP without touching
+/// anything below. See src/server/auth.ts.
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  handle    String
+  createdAt DateTime @default(now())
+
+  builds Build[]
+
+  @@index([email])
+}
+
+/// One developer's run through one campaign. This is the unit of progress:
+/// everything the flow needs to resume after a refresh or a re-login lives here
+/// or hangs off it.
+model Build {
+  id         String @id @default(cuid())
+  userId     String
+  campaignId String
+
+  /// "in_progress" | "launched"
+  status String @default("in_progress")
+
+  xp        Int @default(0)
+  elapsedMs Int @default(0)
+
+  /// Furthest position reached, so we can drop the developer back exactly where
+  /// they were. Stage is a flow-screen key (see src/lib/flow-stages.ts).
+  stage            String  @default("orientation")
+  currentMissionId String?
+
+  /// Missions banked (XP already awarded), stored as a JSON string array.
+  completedMissionIds String @default("[]")
+
+  /// Populated at launch time by the server-side Lyzr proxy.
+  agentId       String?
+  agentName     String?
+  chatSessionId String?
+  launchedAt    DateTime?
+
+  /// Serialized snapshot of the exact payload sent to Lyzr, for the receipt view.
+  launchPayload String?
+
+  /// Public share link. Null until the developer creates one, and set back to
+  /// null on revoke — so the token itself is the capability, and revoking it is
+  /// a real revoke rather than a flag the route could forget to check.
+  shareToken String?   @unique
+  sharedAt   DateTime?
+
+  /// Owner switch for letting visitors talk to the shared agent. The receipt
+  /// half of the page stays readable either way.
+  shareChatEnabled Boolean @default(true)
+
+  /// Lifetime count of visitor messages sent through the share link. This is the
+  /// backstop on the owner's API spend: a link that gets passed around can only
+  /// ever cost SHARE_CHAT_LIMIT turns, no matter how many visitors arrive.
+  shareChatCount Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user        User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  decisions   Decision[]
+  messages    ChatMessage[]
+  escalations Escalation[]
+
+  @@unique([userId, campaignId])
+  @@index([userId])
+}
+
+/// A single answered step. One row per step, upserted on every save, so progress
+/// is durable the moment a developer commits a decision.
+model Decision {
+  id      String @id @default(cuid())
+  buildId String
+  stepId  String
+
+  /// Raw validated value as a JSON string (string | number | boolean).
+  value String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  build Build @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  @@unique([buildId, stepId])
+  @@index([buildId])
+}
+
+/// Transcript for both the built agent and the Mentor, distinguished by `channel`
+/// so one table serves both surfaces and both survive a refresh.
+model ChatMessage {
+  id      String @id @default(cuid())
+  buildId String
+
+  /// "agent" | "mentor"
+  channel String
+  /// "user" | "assistant"
+  role    String
+  content String
+
+  /// Everything about a message that isn't its text, as a JSON string — today
+  /// the web sources a grounded reply was built from, plus why there were none
+  /// when there were none. A JSON *string* rather than a native Json column so
+  /// the schema stays portable across SQLite and Postgres (see the note at the
+  /// top of this file). Null on every message that has no such context, which
+  /// is most of them. Parsed defensively in src/server/builds.ts.
+  meta String?
+
+  createdAt DateTime @default(now())
+
+  build Build @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  @@index([buildId, channel, createdAt])
+}
+
+/// A conversation a person asked to hand to a human.
+///
+/// The point of this table is that the handoff is a *record*, not a sentence.
+/// The agent is structurally incapable of escalating (see NO_ACTIONS_CLAUSE in
+/// src/lib/assemble.ts) and says so; this row is written by an explicit control
+/// the person clicks, so the thing that claims a handoff happened is the same
+/// thing that performed it.
+model Escalation {
+  id      String @id @default(cuid())
+  buildId String
+
+  /// Why they wanted a human, in their words. Optional — a handoff must never
+  /// be gated behind a form.
+  reason String?
+
+  /// The last few turns that led here, as a JSON string array of
+  /// { role, content }. Snapshotted at write time rather than joined at read
+  /// time, so the record still shows what was actually escalated even after the
+  /// agent is rebuilt or the transcript moves on.
+  transcript String @default("[]")
+
+  /// "owner" | "visitor" — whether this came from the builder's own chat or
+  /// from a stranger on the public share link.
+  source String @default("owner")
+
+  /// "open" | "closed". Only ever "open" today; the column exists so resolving
+  /// one later isn't a migration.
+  status String @default("open")
+
+  createdAt DateTime @default(now())
+
+  build Build @relation(fields: [buildId], references: [id], onDelete: Cascade)
+
+  @@index([buildId, createdAt])
+}
+
+/// Tiny key/value store for platform-level singletons — currently the id of the
+/// Mentor agent, which is created once on Lyzr and then reused forever.
+model PlatformConfig {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
