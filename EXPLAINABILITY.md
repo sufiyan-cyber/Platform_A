@@ -36,7 +36,7 @@ rules run on the client for feedback and again on the server as the authority. A
 decisions are governed by the instructions the developer wrote, composed into one string at
 assembly time and visible to them before launch.
 
-## Data it uses
+## Data Sources
 
 The Mentor receives exactly three things per turn: the CONTEXT block described above, the
 developer's typed message, and — through Lyzr short-term memory keyed to a session id of
