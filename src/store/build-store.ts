@@ -8,6 +8,8 @@ import type { ApiError } from "@/lib/api-error";
 import type { LyzrAgentPayload } from "@/lib/assemble";
 import { api } from "@/lib/client-api";
 import { validateStep } from "@/lib/validation";
+import { decisionsFingerprint, serializeAgentSource } from "@/lib/agent-source";
+import { rememberMode, type BuildMode } from "@/lib/mode";
 import {
   activeMissionId,
   firstOpenStepIndex,
@@ -31,9 +33,18 @@ import {
  * a reload would fetch, so there is no divergence to reconcile.
  */
 
+export type SourceSaveResult = {
+  ok: boolean;
+  awarded: { missionId: string; xp: number }[];
+  invalid: Record<string, string>;
+};
+
 export type BuildStoreState = {
   campaign: Campaign;
   build: BuildState;
+
+  /** Guided screens or the editor. Persisted as a cookie, mirrored into the URL. */
+  mode: BuildMode;
 
   /** Raw in-progress input, keyed by step id. Strings — inputs speak strings. */
   drafts: Record<string, string>;
@@ -62,7 +73,35 @@ export type BuildStoreState = {
     error: ApiError | null;
   };
 
+  /**
+   * The editor's buffer.
+   *
+   * `syncedAt` fingerprints the decisions the buffer was last generated from or
+   * saved against. It is what tells an unsaved edit (fingerprint still matches;
+   * keep the buffer) apart from a decision that moved underneath it in the
+   * guided screens (fingerprint differs; regenerate). Without it, switching
+   * modes would either lose work or show a stale file, and both are the kind of
+   * bug you only notice after you've lost the paragraph you were writing.
+   */
+  source: {
+    text: string;
+    syncedAt: string;
+    saving: boolean;
+    error: ApiError | null;
+    lastSavedAt: number | null;
+    /** Per-field refusals from the last save. The server's verdict, not ours. */
+    invalid: Record<string, string>;
+  };
+
   /* ── actions ──────────────────────────────────────────────────────────── */
+  setMode: (mode: BuildMode) => void;
+  setSourceText: (text: string) => void;
+  /** Regenerates the buffer when the decisions behind it have moved on. */
+  syncSource: () => void;
+  /** Restores an unsaved buffer from this browser. Client-only; call in an effect. */
+  hydrateSource: () => void;
+  saveSource: () => Promise<SourceSaveResult>;
+
   setDraft: (stepId: string, value: string) => void;
   commitStep: (stepId: string) => Promise<boolean>;
   goToStage: (stage: Stage, missionId?: string) => void;
@@ -89,7 +128,11 @@ export type BuildStore = ReturnType<typeof createBuildStore>;
  * would be shared across concurrent SSR renders, which is a cross-user data leak
  * waiting to happen.
  */
-export function createBuildStore(campaign: Campaign, build: BuildState) {
+export function createBuildStore(
+  campaign: Campaign,
+  build: BuildState,
+  initialMode: BuildMode = "guided",
+) {
   const initialMission = build.currentMissionId ?? activeMissionId(campaign, build.decisions);
   const initialStepIndex = Math.max(0, firstOpenStepIndex(campaign, initialMission, build.decisions));
 
@@ -104,6 +147,33 @@ export function createBuildStore(campaign: Campaign, build: BuildState) {
     };
 
     const buildPath = (suffix = "") => `/api/builds/${build.id}${suffix}`;
+
+    /*
+      The editor buffer is kept in this browser, not on the server.
+
+      Everything *valid* already persists the moment it's saved, so what's left
+      to protect is the half-written paragraph and the field that doesn't
+      validate yet — which is exactly the material a developer would be angriest
+      to lose to a stray refresh, and exactly the material the server has no
+      business holding. localStorage covers it without a schema change.
+    */
+    const storageKey = `agent-forge:source:${build.id}`;
+    let storeTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const rememberBuffer = (text: string, syncedAt: string) => {
+      if (typeof window === "undefined") return;
+      if (storeTimer) clearTimeout(storeTimer);
+      // Coalesced: a keystroke shouldn't cost a synchronous write of a file that
+      // can run to tens of kilobytes.
+      storeTimer = setTimeout(() => {
+        try {
+          window.localStorage.setItem(storageKey, JSON.stringify({ text, syncedAt }));
+        } catch {
+          // Private mode, or the quota is full. The buffer is still on screen and
+          // still saveable — losing the backup is not worth interrupting anyone.
+        }
+      }, 400);
+    };
 
     /** Fire-and-forget position persist. A failure here must never block the UI. */
     const persistPosition = async (patch: {
@@ -121,6 +191,7 @@ export function createBuildStore(campaign: Campaign, build: BuildState) {
     return {
       campaign,
       build,
+      mode: initialMode,
       drafts: draftsFromBuild(build),
       fieldErrors: {},
       savingStepId: null,
@@ -134,6 +205,119 @@ export function createBuildStore(campaign: Campaign, build: BuildState) {
 
       launch: { pending: false, error: null, payload: build.launchPayload },
       mentor: { open: false, loaded: false, pending: false, messages: [], error: null },
+
+      source: {
+        text: serializeAgentSource(campaign, build.decisions),
+        syncedAt: decisionsFingerprint(campaign, build.decisions),
+        saving: false,
+        error: null,
+        lastSavedAt: null,
+        invalid: {},
+      },
+
+      /* ── mode + the editor buffer ───────────────────────────────────────── */
+
+      setMode: (mode) => {
+        rememberMode(mode);
+        set({ mode });
+        // Entering the editor with a buffer built from stale decisions would show
+        // someone their own agent as it was two screens ago.
+        if (mode === "code") get().syncSource();
+      },
+
+      setSourceText: (text) => {
+        set((state) => ({ source: { ...state.source, text } }));
+        rememberBuffer(text, get().source.syncedAt);
+      },
+
+      syncSource: () => {
+        const state = get();
+        const fingerprint = decisionsFingerprint(state.campaign, state.build.decisions);
+        if (fingerprint === state.source.syncedAt) return;
+
+        const text = serializeAgentSource(state.campaign, state.build.decisions);
+        set({
+          source: { ...state.source, text, syncedAt: fingerprint, invalid: {}, error: null },
+        });
+        rememberBuffer(text, fingerprint);
+      },
+
+      hydrateSource: () => {
+        if (typeof window === "undefined") return;
+
+        let stored: unknown = null;
+        try {
+          const raw = window.localStorage.getItem(storageKey);
+          stored = raw ? JSON.parse(raw) : null;
+        } catch {
+          stored = null;
+        }
+
+        const state = get();
+        const fingerprint = decisionsFingerprint(state.campaign, state.build.decisions);
+
+        // Only restore a buffer that belongs to the decisions we're holding now.
+        // A mismatch means the build moved on elsewhere — in the guided screens,
+        // on another device — and the saved copy is the older story.
+        if (
+          stored &&
+          typeof stored === "object" &&
+          typeof (stored as { text?: unknown }).text === "string" &&
+          (stored as { syncedAt?: unknown }).syncedAt === fingerprint
+        ) {
+          set((current) => ({
+            source: { ...current.source, text: (stored as { text: string }).text },
+          }));
+          return;
+        }
+
+        get().syncSource();
+      },
+
+      saveSource: async () => {
+        const state = get();
+        set({ source: { ...state.source, saving: true, error: null } });
+
+        const result = await api.put<{
+          build: BuildState;
+          saved: string[];
+          invalid: Record<string, string>;
+          awarded: { missionId: string; xp: number }[];
+        }>(buildPath("/source"), {
+          text: state.source.text,
+          stage: state.stage,
+          elapsedMs: Math.round(state.elapsedMs),
+        });
+
+        if (!result.ok) {
+          set((current) => ({
+            source: { ...current.source, saving: false, error: result.error },
+          }));
+          return { ok: false, awarded: [], invalid: {} };
+        }
+
+        const syncedAt = decisionsFingerprint(state.campaign, result.data.build.decisions);
+
+        set((current) => ({
+          build: result.data.build,
+          // Drafts follow, so a hop back to the guided screens shows the fields
+          // pre-filled with what the file says rather than what it used to.
+          drafts: { ...current.drafts, ...draftsFromBuild(result.data.build) },
+          fieldErrors: {},
+          source: {
+            ...current.source,
+            saving: false,
+            error: null,
+            syncedAt,
+            lastSavedAt: Date.now(),
+            invalid: result.data.invalid,
+          },
+        }));
+
+        rememberBuffer(get().source.text, syncedAt);
+
+        return { ok: true, awarded: result.data.awarded, invalid: result.data.invalid };
+      },
 
       /* ── decisions ──────────────────────────────────────────────────────── */
 

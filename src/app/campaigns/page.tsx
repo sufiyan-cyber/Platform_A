@@ -33,6 +33,11 @@ export default async function CampaignsPage() {
             Each campaign is a different shape of problem. Your progress is saved per campaign —
             leaving one to try another loses nothing.
           </p>
+          <p className="mt-2 max-w-[64ch] text-[13px] leading-relaxed text-ink-mute">
+            Every campaign builds two ways: guided, one decision at a time — or as a file in an
+            editor, if you&rsquo;d rather just write the config. Switch between them whenever;
+            they&rsquo;re the same build.
+          </p>
 
           {!isLyzrConfigured && (
             <div

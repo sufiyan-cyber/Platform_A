@@ -4,6 +4,8 @@ A guided build experience for developers: you make one decision at a time, watch
 
 You never write an agent from scratch. Each step asks for exactly one thing, explains the trade-off behind it, validates it, saves it, and drops it into an evolving artifact. At the end, every decision assembles into a live agent.
 
+If you'd rather just write the thing, every campaign also opens as **a file in an editor** — same decisions, same validation, same launch. See [Two ways to build](#two-ways-to-build).
+
 ---
 
 ## Quick start
@@ -101,6 +103,7 @@ Browser ──► /api/builds/*  ──►  src/server/lyzr.ts  ──►  Lyzr 
 | `src/campaigns/**` | Campaign content as **pure data** — levels, missions, steps, guidance, artifact, assembly rules |
 | `src/lib/validation.ts` | Compiles a campaign's declarative rule into Zod. Same rule runs on client and server |
 | `src/lib/assemble.ts` | Turns collected decisions into the Lyzr create-agent payload |
+| `src/lib/agent-source.ts` | The same decisions as an editable file: serialise, parse, diagnose. Pure, and runs on both sides of the wire |
 | `src/lib/flow.ts` | Derives all progression from persisted decisions |
 | `src/server/lyzr.ts` | The Lyzr proxy: timeouts, retries, defensive response parsing |
 | `src/server/mentor.ts` | The Mentor agent — created once, cached, context-injected per turn |
@@ -109,6 +112,8 @@ Browser ──► /api/builds/*  ──►  src/server/lyzr.ts  ──►  Lyzr 
 | `samples/**` | A fictional company's handbook plus the distilled block to paste into the Grounding mission, and a test script for checking the result |
 | `src/store/build-store.ts` | Client flow state: server truth vs. local drafts, kept strictly separate |
 | `src/components/flow/**` | The guided screens |
+| `src/components/ide/**` | The editor: the code surface, live diagnostics, the generated files beside it |
+| `src/components/build/**` | What both surfaces share — the mode switch and the session-level concerns |
 
 ### Lyzr is the execution layer only
 
@@ -150,6 +155,61 @@ Dogfooding: the in-product assistant is created once via the same API, its id ca
 
 ---
 
+## Two ways to build
+
+The same campaign, the same `Decision` rows, two surfaces. Pick either at the
+orientation screen, and switch at any point with the toggle in the header —
+mid-mission, mid-sentence, it doesn't matter.
+
+| | Guided | Code |
+|---|---|---|
+| Shape | One decision per screen, in campaign order | The whole agent as one file, any order |
+| Guidance | Beside the field you're answering | Beside the cursor, following the block you're in |
+| Validation | On blur/continue | Live, in the gutter and a Problems list |
+| Saves | One decision at a time | The whole file, valid fields only |
+| XP, missions, launch, sharing | identical | identical |
+
+The choice is remembered in a plain cookie (`af_mode`) and mirrored into `?mode=`,
+so a link can name the surface it means and a returning developer lands where
+they left off. It is *not* a column on `Build`: it's a property of the person,
+not of the agent they're making.
+
+### The file format
+
+```
+[stepId]  # terse constraint hint
+everything until the next field header, verbatim
+```
+
+One rule, no exceptions: **a field's value is every line between its header and
+the next header, exactly as typed.** No comment stripping inside a block, no
+escaping, no continuation markers. Half these fields are multi-line prose pasted
+out of a real handbook, and a format that ate a line beginning with `#` would
+silently change what the agent is allowed to say. Comments live on header lines
+and in the preamble, where they can't be mistaken for content.
+
+Three consequences worth knowing:
+
+- **Nothing invalid reaches the build.** A save writes the fields that pass and
+  reports the ones that don't — refusing the whole file over one bad field is how
+  an editor loses an hour of somebody's work. The route re-parses and re-validates
+  server-side with the campaign's own rules, exactly like `PUT /decisions` does.
+- **Unsaved *text* lives in this browser, not on the server.** Valid fields are
+  already persisted, so what's left is the half-written paragraph — precisely the
+  material the server has no business holding. It's fingerprinted against the
+  decisions it was generated from, so an unsaved edit is never confused with a
+  decision that moved underneath it in the guided screens.
+- **XP works the same.** Saving banks any mission whose steps now all validate,
+  server-checked and idempotent — the same standard the guided XP route holds
+  itself to.
+
+Beside the file sit three generated, read-only views that update as you type:
+`agent.payload.json` (byte-for-byte what gets POSTed), `instructions.md` (your
+fields composed into the single string the model reads), and `campaign.md`
+(every step's reasoning, so nobody trades the *why* for the file).
+
+---
+
 ## Adding a campaign
 
 A campaign is data. No flow logic changes.
@@ -157,7 +217,7 @@ A campaign is data. No flow logic changes.
 1. Create `src/campaigns/your-campaign.ts` exporting a `Campaign` (see `support-desk.ts` as the reference — it's commented for this purpose).
 2. Add it to the `CAMPAIGNS` array in `src/campaigns/index.ts`.
 
-That's it. The flow shell, validation, artifact, checklist, guidance panel, progression, XP, launch and chat all read from the object.
+That's it. The flow shell, validation, artifact, checklist, guidance panel, progression, XP, launch and chat all read from the object — and so does the editor. A new campaign gets its file, its header hints, its live diagnostics, its outline and its generated previews with no extra work, because all of them are derived from the same steps.
 
 The pieces you author:
 
@@ -285,10 +345,11 @@ There are no exit animations in this codebase, and that's deliberate. Under Reac
 npm test
 ```
 
-97 tests over the critical path:
+151 tests over the critical path:
 
 - **`tests/validation.test.ts`** — step validation across all rule kinds, plus structural assertions on the shipped campaign data.
 - **`tests/assemble.test.ts`** — decisions → Lyzr payload, exact field shape, instruction composition, and refusal to build an incomplete config.
+- **`tests/agent-source.test.ts`** — the editor's format: round-tripping every shipped campaign, multi-line prose surviving byte-for-byte (including `#` lines and bracketed phrases inside a value), diagnostics, and dirty-state detection.
 - **`tests/lyzr.test.ts`** — defensive response parsing, error retryability, rate limiting.
 - **`tests/flow.test.ts`** — progression, resume position, artifact growth, progress maths.
 - **`tests/share.test.ts`** — share-state shaping, and the display-name derivation in `src/lib/handle.ts`.

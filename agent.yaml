@@ -1,0 +1,20 @@
+spec_version: "0.1.0"
+name: agent-forge
+version: 1.0.0
+description: >-
+  Agent Forge is a guided build platform for developers. Its in-product agent,
+  the Mentor, coaches a developer through one agent-design decision at a time,
+  and the platform assembles those decisions into a real agent that is created
+  and run on the Lyzr Agent API.
+
+model:
+  preferred: gpt-4o-mini
+
+compliance:
+  risk_tier: low
+  supervision:
+    human_in_the_loop: always
+    kill_switch: true
+  recordkeeping:
+    audit_logging: true
+    immutable: false

@@ -296,6 +296,10 @@ function AgentCard() {
  * its id. A grounded agent gets asked something only a live search can answer,
  * because a first message the agent handles from training data alone teaches the
  * developer nothing about what they just built.
+ *
+ * `Conversation` is exported because the editor's Run panel shows the same live
+ * conversation beside the file that produced it — one implementation of talking
+ * to your agent, not two that drift.
  */
 const DEFAULT_PROMPTS = ["Hey, what can you help me with?", "I want a refund for last month."];
 const GROUNDED_PROMPTS = [
@@ -303,7 +307,7 @@ const GROUNDED_PROMPTS = [
   "What do you actually know about my company?",
 ];
 
-function Conversation({
+export function Conversation({
   buildId,
   agentName,
   grounded,

@@ -1,11 +1,13 @@
 import type { Metadata } from "next";
+import { cookies } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 import { getUser } from "@/server/auth";
 import { getOrCreateBuild } from "@/server/builds";
 import { getCampaign } from "@/campaigns";
 import { isStage } from "@/lib/flow";
+import { isBuildMode, MODE_COOKIE, MODE_PARAM, type BuildMode } from "@/lib/mode";
 import { BuildStoreProvider } from "@/store/build-provider";
-import { FlowShell } from "@/components/flow/flow-shell";
+import { BuildWorkspace } from "@/components/build/build-workspace";
 
 export const dynamic = "force-dynamic";
 
@@ -43,12 +45,30 @@ export default async function BuildPage({ params, searchParams }: Props) {
   // a shared link, a bookmark, and the browser's back button all land where the
   // reader expects. Anything unrecognised is ignored rather than trusted, and
   // with no param at all we resume exactly where they left off.
-  const requested = (await searchParams).stage;
-  const stage = isStage(requested) ? requested : build.stage;
+  const query = await searchParams;
+  const stage = isStage(query.stage) ? query.stage : build.stage;
 
   return (
-    <BuildStoreProvider campaign={campaign} build={{ ...build, stage }}>
-      <FlowShell handle={user.handle} />
+    <BuildStoreProvider campaign={campaign} build={{ ...build, stage }} mode={await resolveMode(query)}>
+      <BuildWorkspace handle={user.handle} />
     </BuildStoreProvider>
   );
+}
+
+/**
+ * Guided screens or the editor, decided before the first byte of HTML.
+ *
+ * The URL wins so a link can name the surface it means; the cookie is the
+ * fallback so a developer who chose the editor last week doesn't get dropped
+ * back into the guided flow. Resolving it here rather than in a client effect is
+ * what stops the wrong shell rendering for a frame on every load.
+ */
+async function resolveMode(
+  query: Record<string, string | string[] | undefined>,
+): Promise<BuildMode> {
+  const requested = query[MODE_PARAM];
+  if (isBuildMode(requested)) return requested;
+
+  const remembered = (await cookies()).get(MODE_COOKIE)?.value;
+  return isBuildMode(remembered) ? remembered : "guided";
 }
